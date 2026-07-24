@@ -22,6 +22,8 @@ For more details, see the [announcement on NixOS Discourse](https://discourse.ni
 ```bash
 git clone https://github.com/giomf/nixoscope
 cd nixoscope
+uv sync
+source .venv/bin/activate
 python -m nixoscope.nixoscope --help
 ```
 
