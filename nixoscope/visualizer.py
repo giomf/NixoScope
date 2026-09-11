@@ -13,21 +13,29 @@ Available strategies:
 from __future__ import annotations
 
 import colorsys
+import contextlib
 import html
+import io
 import json
-import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 import graphviz
 import graphviz.encoding
 
+# mermaid-py prints "Warning: IPython is not installed. Mermaidjs magic function
+# is not available." on import when IPython is missing -- harmless outside a
+# notebook (see https://github.com/ouhammmourachid/mermaid-py/issues/201), but
+# there's no library flag to opt out of it, so it's suppressed here.
+with contextlib.redirect_stdout(io.StringIO()):
+    import mermaid
+    from mermaid.flowchart import FlowChart, Link, Node
+    from mermaid.style import Style
+
 from nixoscope.module_graph import UNKNOWN_SOURCE
 
 if TYPE_CHECKING:
     from nixoscope.module_graph import ModuleGraph
-
-_SAFE_MERMAID_ID_RE: re.Pattern[str] = re.compile(r"[^a-zA-Z0-9]")
 
 
 class Visualizer(ABC):
@@ -119,22 +127,20 @@ class GraphvizVisualizer(Visualizer):
 
 
 class MermaidVisualizer(Visualizer):
-    """Render the graph as a Mermaid ``flowchart TD`` diagram.
+    """Render the graph as a Mermaid ``flowchart TD`` diagram via ``mermaid-py``.
 
-    Node labels use Mermaid's Markdown string syntax (backtick-quoted) to
-    render the module filename in bold and the source hash in italics, with
-    the triggering option on a middle line when present.  Nodes from the same
-    derivation share a pastel background colour applied via ``style``
-    directives.
+    Node labels use HTML formatting to render the module filename in bold and
+    the source hash in italics, with the triggering option on a middle line
+    when present.  Nodes from the same derivation share a pastel ``classDef``
+    style keyed by the source hash.
     """
 
     @staticmethod
     def _node_id(source: str, module: str, key: str) -> str:
-        """Return a Mermaid-safe node identifier.
+        """Return a raw Mermaid node identifier, sanitized by ``mermaid-py``.
 
-        Mermaid node IDs may only contain alphanumerics; all other characters
-        are replaced with underscores and a leading ``n`` is prepended to
-        avoid IDs that start with a digit.
+        A leading ``n`` is prepended so the identifier never starts with a
+        digit, which Nix store hashes commonly do.
 
         Args:
             source: Nix store hash of the owning derivation.
@@ -143,25 +149,33 @@ class MermaidVisualizer(Visualizer):
 
         """
         raw = f"{source}_{module}_{key}" if key else f"{source}_{module}"
-        return "n" + _SAFE_MERMAID_ID_RE.sub("_", raw)
+        return f"n_{raw}"
 
     def render(self, graph: ModuleGraph) -> str:
         """Return the Mermaid ``flowchart TD`` source string for *graph*."""
-        lines = ["flowchart TD"]
+        styles: dict[str, Style] = {}
+        nodes: dict[tuple[str, str, str], Node] = {}
 
         for (source, module, key), node in graph.modules.items():
-            nid = self._node_id(source, module, key)
-            parts = [f"**{module}**", node.option, f"_{source}_"]
-            lines.append('    {}["`{}`"]'.format(nid, "\n".join(parts)))
+            style = styles.setdefault(
+                source,
+                Style(
+                    name=mermaid.text_to_snake_case(f"src_{source}"),
+                    fill=self._color_from_source(source),
+                    color="#000000",
+                ),
+            )
+            parts = [f"<b>{module}</b>", *([node.option] if node.option else []), f"<i>{source}</i>"]
+            nodes[source, module, key] = Node(
+                id_=self._node_id(source, module, key),
+                content="<br/>".join(parts),
+                styles=[style],
+            )
 
-        for (source, module, key), node in graph.modules.items():
-            from_id = self._node_id(source, module, key)
-            for edge in node.imports:
-                to_id = self._node_id(edge.source, edge.module, edge.key)
-                lines.append(f"    {from_id} --> {to_id}")
+        links = [
+            Link(nodes[source, module, key], nodes[edge.source, edge.module, edge.key])
+            for (source, module, key), node in graph.modules.items()
+            for edge in node.imports
+        ]
 
-        for source, module, key in graph.modules:
-            nid = self._node_id(source, module, key)
-            lines.append(f"    style {nid} fill:{self._color_from_source(source)},color:#000000")
-
-        return "\n".join(lines)
+        return FlowChart("ModuleGraph", list(nodes.values()), links, orientation="TD").script
