@@ -45,6 +45,7 @@
               pkgs.ruff
               pkgs.ty
               pkgs.uv
+              pkgs.git-cliff
               pp.python
               # Only used for goto definiton/...
               pp.python-lsp-server
