@@ -93,7 +93,9 @@ one is harmless, but real configs produce long, uninformative chains of them:
 
 ```mermaid
 graph LR
-    A[Known] --> B["Unknown (optA)"] --> C["Unknown (optA)"] --> D[Known]
+    classDef known fill:#b6e5b2,color:#000
+    classDef unknown fill:#e5b2b2,color:#000
+    A[Known]:::known --> B["Unknown (optA)"]:::unknown --> C["Unknown (optA)"]:::unknown --> D[Known]:::known
 ```
 
 nixoscope collapses a run of unknown modules with the same triggering option
@@ -101,7 +103,9 @@ into one node carrying a count:
 
 ```mermaid
 graph LR
-    A[Known] --> B["2 unknown modules (optA)"] --> D[Known]
+    classDef known fill:#b6e5b2,color:#000
+    classDef unknown fill:#e5b2b2,color:#000
+    A[Known]:::known --> B["2 unknown modules (optA)"]:::unknown --> D[Known]:::known
 ```
 
 ### Grouping
@@ -115,13 +119,17 @@ option (`optA`) - that's what makes them mergeable in the first place.
 
 ```mermaid
 graph LR
-    A[Known] --> B["Unknown (optA)"] --> D[Real]
-    A --> C["Unknown (optA)"]
+    classDef known fill:#b6e5b2,color:#000
+    classDef unknown fill:#e5b2b2,color:#000
+    A[Known]:::known --> B["Unknown (optA)"]:::unknown --> D[Real]:::known
+    A --> C["Unknown (optA)"]:::unknown
 ```
 
 ```mermaid
 graph LR
-    A[Known] --> B["2 unknown modules (optA)"] --> D[Real]
+    classDef known fill:#b6e5b2,color:#000
+    classDef unknown fill:#e5b2b2,color:#000
+    A[Known]:::known --> B["2 unknown modules (optA)"]:::unknown --> D[Real]:::known
 ```
 
 Two unknown modules that genuinely lead to *different* destinations are
@@ -136,8 +144,10 @@ option* that does lead somewhere real:
 
 ```mermaid
 graph LR
-    A[Known] --> B["Unknown (optA)"] --> A
-    A --> C["Unknown (optA)"] --> D[Real]
+    classDef known fill:#b6e5b2,color:#000
+    classDef unknown fill:#e5b2b2,color:#000
+    A[Known]:::known --> B["Unknown (optA)"]:::unknown --> A
+    A --> C["Unknown (optA)"]:::unknown --> D[Real]:::known
 ```
 
 The self-loop is merged into the real-destination sibling instead of
@@ -146,7 +156,9 @@ edge on the merged node:
 
 ```mermaid
 graph LR
-    A[Known] <--> B["Unknown (optA)"] --> D[Real]
+    classDef known fill:#b6e5b2,color:#000
+    classDef unknown fill:#e5b2b2,color:#000
+    A[Known]:::known <--> B["Unknown (optA)"]:::unknown --> D[Real]:::known
 ```
 
 ## Result
