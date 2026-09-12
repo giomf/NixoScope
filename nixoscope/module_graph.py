@@ -20,6 +20,9 @@ _UNKNOWN_MODULE: str = "<unknown-module>"
 _UNKNOWN_FUNCTION_CHAIN: str = "<unknown-function-chain>"
 _UNKNOWN_FUNCTION_CHAIN_REGEX: str = r"(__functor|includes|<function body>).*$"
 
+# A node's (source, module, key) identity tuple, used throughout ModuleGraph.
+_Identity = tuple[str, str, str]
+
 
 @dataclass
 class ModuleGraphEdge:
@@ -71,6 +74,17 @@ class ModuleGraphEdge:
             self.module, _, option = module_and_option.partition(", via option ")
         self.option = re.sub(_UNKNOWN_FUNCTION_CHAIN_REGEX, _UNKNOWN_FUNCTION_CHAIN, option)
         self.key = key
+
+    @classmethod
+    def from_identity(cls, source: str, module: str, key: str, option: str) -> ModuleGraphEdge:
+        """Build an edge directly from its identity fields, bypassing raw-dict parsing.
+
+        Used for synthetic back-edges (see :meth:`ModuleGraph._add_backedges`) that
+        have no raw JSON entry behind them.
+        """
+        edge = cls.__new__(cls)
+        edge.source, edge.module, edge.key, edge.option = source, module, key, option
+        return edge
 
     def to_dict(self) -> dict:
         """Serialise to a plain dict, omitting ``option`` when empty."""
@@ -141,7 +155,7 @@ class ModuleGraph:
 
     """
 
-    modules: dict[tuple[str, str, str], ModuleGraphNode]
+    modules: dict[_Identity, ModuleGraphNode]
 
     def __init__(self, raw_modules: list, option_filter: str | None) -> None:
         """Build a ModuleGraph from the loaded JSON data.
@@ -210,50 +224,97 @@ class ModuleGraph:
     def _merge_redundant_unknown_nodes(self) -> None:
         """Merge unknown-source nodes that carry no distinguishing information.
 
-        Two unknown-source nodes are redundant duplicates of each other when they
-        share the same triggering option and the exact same set of outgoing
-        destinations: neither tells a viewer anything the other doesn't, so they
-        are merged into one, summing their ``collapsed_count``. This is a global
-        equivalence (not limited to literal siblings of one parent) and repeats
-        until a full pass makes no further merges, since collapsing one group can
-        change a node's own destination set and reveal a further equivalence
-        one level up.
+        Two unknown-source nodes with the same option are redundant duplicates when
+        they lead to the same real destinations -- destinations that aren't simply
+        one of the node's own importing parents. A node whose only destinations are
+        empty or are all just its own parent(s) (a "pure self-loop", the shape a
+        recursive submodule type produces) is a wildcard for its option: merging it
+        into the option's one real-destination sibling loses nothing, since that
+        option's existence and real destination are already shown there -- and the
+        self-loop itself isn't dropped, it's folded into the survivor as a back-edge
+        to the parent it looped to. If an option has more than one distinct real
+        destination, a wildcard for it is left alone rather than guessing which one
+        it belonged to. Repeats until a full pass makes no further merges, since
+        collapsing one group can change a node's own destination set and reveal a
+        further equivalence one level up.
         """
         while True:
-            remap = self._collapse_equivalent_unknown_groups()
-            if not remap:
+            remap, backedges = self._collapse_equivalent_unknown_groups()
+            added_backedges = self._add_backedges(backedges)
+            if not remap and not added_backedges:
                 return
             self._redirect_imports(remap)
 
-    def _collapse_equivalent_unknown_groups(self) -> dict[tuple[str, str, str], tuple[str, str, str]]:
-        """Merge each group of equivalent unknown-source nodes into one survivor.
+    def _index_unknown_nodes_by_option(
+        self,
+    ) -> tuple[dict[str, dict[frozenset, list[_Identity]]], dict[_Identity, set[_Identity]]]:
+        """Group unknown-source nodes by ``(option, real destinations)``.
 
-        Returns a mapping from every merged-away node's identity to the survivor
-        it was merged into, for :meth:`_redirect_imports` to apply.
+        "Real" destinations exclude any destination that is simply one of the
+        node's own importing parents -- a node whose real destinations are empty
+        is a wildcard for its option (see :meth:`_collapse_equivalent_unknown_groups`).
+        Also returns each node's self-loop destinations (the ones excluded above),
+        for :meth:`_collapse_equivalent_unknown_groups` to fold into a survivor.
         """
-        groups: dict[tuple[str, frozenset], list[tuple[str, str, str]]] = {}
+        parents: dict[_Identity, set[_Identity]] = {}
+        for key, node in self.modules.items():
+            for edge in node.imports:
+                parents.setdefault((edge.source, edge.module, edge.key), set()).add(key)
+
+        by_option: dict[str, dict[frozenset, list[_Identity]]] = {}
+        self_loops: dict[_Identity, set[_Identity]] = {}
         for key, node in self.modules.items():
             if node.source != UNKNOWN_SOURCE:
                 continue
-            destinations = frozenset((e.source, e.module, e.key) for e in node.imports)
-            groups.setdefault((node.option, destinations), []).append(key)
+            destinations = {(e.source, e.module, e.key) for e in node.imports}
+            own_parents = parents.get(key, set())
+            self_loops[key] = destinations & own_parents
+            real_destinations = frozenset(destinations - own_parents)
+            by_option.setdefault(node.option, {}).setdefault(real_destinations, []).append(key)
+        return by_option, self_loops
 
-        remap: dict[tuple[str, str, str], tuple[str, str, str]] = {}
-        for members in groups.values():
-            survivor, *duplicates = members
-            if not duplicates:
-                continue
-            self.modules[survivor].collapsed_count += sum(self.modules[d].collapsed_count for d in duplicates)
-            for duplicate in duplicates:
-                remap[duplicate] = survivor
-                del self.modules[duplicate]
-        return remap
+    def _collapse_equivalent_unknown_groups(
+        self,
+    ) -> tuple[dict[_Identity, _Identity], dict[_Identity, set[_Identity]]]:
+        """Merge each group of equivalent unknown-source nodes into one survivor.
 
-    def _redirect_imports(self, remap: dict[tuple[str, str, str], tuple[str, str, str]]) -> None:
+        Returns the mapping from every merged-away node's identity to the survivor
+        it was merged into (for :meth:`_redirect_imports`), and a mapping from each
+        survivor to the self-loop targets it absorbed (for :meth:`_add_backedges`).
+        """
+        by_option, self_loops = self._index_unknown_nodes_by_option()
+
+        remap: dict[_Identity, _Identity] = {}
+        backedges: dict[_Identity, set[_Identity]] = {}
+        for destination_groups in by_option.values():
+            wildcards = destination_groups.pop(frozenset(), [])
+            groups = list(destination_groups.values())
+            if wildcards:
+                # Only fold dead ends/self-loops into a real destination when that
+                # destination is unambiguous; if the option genuinely leads to
+                # several different places, leave them as their own group.
+                (groups[0].extend(wildcards) if len(groups) == 1 else groups.append(wildcards))
+
+            for members in groups:
+                survivor, *duplicates = members
+                absorbed_self_loops = set(self_loops.get(survivor, set()))
+                for duplicate in duplicates:
+                    absorbed_self_loops |= self_loops.get(duplicate, set())
+                if absorbed_self_loops:
+                    backedges.setdefault(survivor, set()).update(absorbed_self_loops)
+                if not duplicates:
+                    continue
+                self.modules[survivor].collapsed_count += sum(self.modules[d].collapsed_count for d in duplicates)
+                for duplicate in duplicates:
+                    remap[duplicate] = survivor
+                    del self.modules[duplicate]
+        return remap, backedges
+
+    def _redirect_imports(self, remap: dict[_Identity, _Identity]) -> None:
         """Point every edge targeting a merged-away node at its survivor instead."""
         for node in self.modules.values():
             deduped: list[ModuleGraphEdge] = []
-            seen: set[tuple[str, str, str]] = set()
+            seen: set[_Identity] = set()
             for edge in node.imports:
                 target = (edge.source, edge.module, edge.key)
                 if target in remap:
@@ -263,6 +324,26 @@ class ModuleGraph:
                     seen.add(target)
                     deduped.append(edge)
             node.imports = deduped
+
+    def _add_backedges(self, backedges: dict[_Identity, set[_Identity]]) -> bool:
+        """Add a back-edge from each survivor to every parent it was self-looping to.
+
+        Returns whether any new edge was actually added, so the caller can tell
+        real progress from re-detecting a back-edge that's already in place.
+        """
+        added = False
+        for survivor, targets in backedges.items():
+            node = self.modules.get(survivor)
+            if node is None:
+                continue
+            existing = {(e.source, e.module, e.key) for e in node.imports}
+            for target_key in targets:
+                if target_key in existing or target_key not in self.modules:
+                    continue
+                target_option = self.modules[target_key].option
+                node.imports.append(ModuleGraphEdge.from_identity(*target_key, target_option))
+                added = True
+        return added
 
     def _get_or_create_module(self, edge: ModuleGraphEdge) -> ModuleGraphNode:
         """Return the existing node for ``edge``, creating it if necessary."""

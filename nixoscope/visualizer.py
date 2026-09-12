@@ -35,7 +35,12 @@ with contextlib.redirect_stdout(io.StringIO()):
 from nixoscope.module_graph import UNKNOWN_SOURCE
 
 if TYPE_CHECKING:
-    from nixoscope.module_graph import ModuleGraph
+    from nixoscope.module_graph import ModuleGraph, ModuleGraphNode
+
+
+def _import_keys(node: ModuleGraphNode) -> set[tuple[str, str, str]]:
+    """Return the identity tuples of everything *node* imports."""
+    return {(edge.source, edge.module, edge.key) for edge in node.imports}
 
 
 class Visualizer(ABC):
@@ -118,15 +123,30 @@ class GraphvizVisualizer(Visualizer):
             label = f"<<B>{html.escape(display_module)}</B><BR/>{html.escape(node.option)}<BR/><I>{html.escape(source)}</I>>"
             dot.node(name=node_id, label=label, fillcolor=self._color_from_source(source))
 
+        drawn_pairs: set[frozenset] = set()
         for (source, module, key), node in graph.modules.items():
             from_id = graphviz.escape(f"{source}-{module}")
             if source == UNKNOWN_SOURCE:
                 from_id = graphviz.escape(f"{from_id}-{key}")
+            from_key = (source, module, key)
             for edge in node.imports:
+                to_key = (edge.source, edge.module, edge.key)
+                pair = frozenset((from_key, to_key))
+                if pair in drawn_pairs:
+                    continue
                 to_id = graphviz.escape(f"{edge.source}-{edge.module}")
                 if edge.source == UNKNOWN_SOURCE:
                     to_id = graphviz.escape(f"{to_id}-{edge.key}")
-                dot.edge(from_id, to_id)
+                target = graph.modules.get(to_key)
+                # A merged self-loop survivor (see ModuleGraph._add_backedges) imports its
+                # own parent back, forming a genuine mutual pair -- draw it as one
+                # double-headed edge instead of two overlapping ones.
+                is_mutual = from_key != to_key and target is not None and from_key in _import_keys(target)
+                if is_mutual:
+                    dot.edge(from_id, to_id, dir="both")
+                    drawn_pairs.add(pair)
+                else:
+                    dot.edge(from_id, to_id)
 
         return str(dot)
 

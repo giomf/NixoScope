@@ -339,6 +339,61 @@ class TestRedundantUnknownNodeMerging(unittest.TestCase):
             (p2_node.imports[0].source, p2_node.imports[0].module, p2_node.imports[0].key),
         )
 
+    def test_self_loop_merges_into_real_destination_sibling(self) -> None:
+        # K has two same-option unknown children: one a pure self-loop back to K,
+        # one leading to a real, different known node. They merge into one node
+        # that keeps both destinations -- the real one and a back-edge to K --
+        # instead of the self-loop being dropped or left as clutter.
+        graph = ModuleGraph(
+            [
+                make_node(
+                    "flake.nix",
+                    make_node(
+                        "k.nix",
+                        make_unknown_node("u_loop", make_node("k.nix"), option="optA"),
+                        make_unknown_node("u_real", make_node("real.nix"), option="optA"),
+                    ),
+                )
+            ],
+            option_filter=None,
+        )
+
+        unknown_keys = _unknown_keys(graph)
+        self.assertEqual(len(unknown_keys), 1)
+        survivor = graph.modules[unknown_keys[0]]
+        self.assertEqual(survivor.collapsed_count, 2)
+        self.assertEqual(
+            {(e.source, e.module, e.key) for e in survivor.imports},
+            {(_SOURCE, "real.nix", ""), (_SOURCE, "k.nix", "")},
+        )
+
+        k_node = graph.modules[(_SOURCE, "k.nix", "")]
+        self.assertEqual({(e.source, e.module, e.key) for e in k_node.imports}, {unknown_keys[0]})
+
+    def test_self_loop_not_merged_when_option_has_multiple_real_destinations(self) -> None:
+        # Same shape as above, but the option leads to two *different* real
+        # destinations -- ambiguous, so nothing is merged (matches the existing
+        # "don't guess" rule for wildcards with more than one real group).
+        graph = ModuleGraph(
+            [
+                make_node(
+                    "flake.nix",
+                    make_node(
+                        "k.nix",
+                        make_unknown_node("u_loop", make_node("k.nix"), option="optA"),
+                        make_unknown_node("u_real1", make_node("real1.nix"), option="optA"),
+                        make_unknown_node("u_real2", make_node("real2.nix"), option="optA"),
+                    ),
+                )
+            ],
+            option_filter=None,
+        )
+
+        unknown_keys = _unknown_keys(graph)
+        self.assertEqual(len(unknown_keys), 3)
+        for key in unknown_keys:
+            self.assertEqual(graph.modules[key].collapsed_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
