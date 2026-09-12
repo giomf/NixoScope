@@ -110,7 +110,12 @@ class GraphvizVisualizer(Visualizer):
             node_id = graphviz.escape(f"{source}-{module}")
             if source == UNKNOWN_SOURCE:
                 node_id = graphviz.escape(f"{node_id}-{key}")
-            label = f"<<B>{html.escape(module)}</B><BR/>{html.escape(node.option)}<BR/><I>{html.escape(source)}</I>>"
+            display_module = (
+                f"{node.collapsed_count} unknown module{'s' if node.collapsed_count != 1 else ''}"
+                if source == UNKNOWN_SOURCE
+                else module
+            )
+            label = f"<<B>{html.escape(display_module)}</B><BR/>{html.escape(node.option)}<BR/><I>{html.escape(source)}</I>>"
             dot.node(name=node_id, label=label, fillcolor=self._color_from_source(source))
 
         for (source, module, key), node in graph.modules.items():
@@ -165,7 +170,12 @@ class MermaidVisualizer(Visualizer):
                     color="#000000",
                 ),
             )
-            parts = [f"<b>{module}</b>", *([node.option] if node.option else []), f"<i>{source}</i>"]
+            display_module = (
+                f"{node.collapsed_count} unknown module{'s' if node.collapsed_count != 1 else ''}"
+                if source == UNKNOWN_SOURCE
+                else module
+            )
+            parts = [f"<b>{display_module}</b>", *([node.option] if node.option else []), f"<i>{source}</i>"]
             nodes[source, module, key] = Node(
                 id_=self._node_id(source, module, key),
                 content="<br/>".join(parts),

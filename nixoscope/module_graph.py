@@ -101,15 +101,23 @@ class ModuleGraphNode(ModuleGraphEdge):
     """A node in the module graph, extending :class:`ModuleGraphEdge` with its outgoing imports.
 
     Attributes:
-        imports: Ordered list of edges to modules directly imported by this node.
+        imports:         Ordered list of edges to modules directly imported by this node.
+        collapsed_count: Number of consecutive same-option unknown-source entries merged
+                         into this node (see :meth:`ModuleGraph._process_entry`). Always
+                         ``1`` for known-source nodes, which are never merged.
 
     """
 
     imports: list[ModuleGraphEdge] = field(default_factory=list)
+    collapsed_count: int = 1
 
     def to_dict(self) -> dict:
         """Serialise node and all its imports recursively to a plain dict."""
-        return super().to_dict() | {"imports": [module.to_dict() for module in self.imports]}
+        return (
+            super().to_dict()
+            | ({"collapsed_count": self.collapsed_count} if self.collapsed_count > 1 else {})
+            | {"imports": [module.to_dict() for module in self.imports]}
+        )
 
     def __eq__(self, other: object) -> bool:
         """Inherit equality semantics from :class:`ModuleGraphEdge`."""
@@ -147,6 +155,7 @@ class ModuleGraph:
         self.modules = {}
         for raw_module in raw_modules:
             self._process_entry(raw_module, option_filter=option_filter)
+        self._merge_redundant_unknown_nodes()
 
     def _process_entry(
         self,
@@ -160,8 +169,26 @@ class ModuleGraph:
         option matches the filter prefix. Excluded nodes are skipped but their
         children are still traversed using the last retained ancestor as parent,
         effectively reparenting them.
+
+        Consecutive unknown-source entries that share the same triggering
+        option are collapsed: instead of creating a new node, the entry is
+        merged into ``parent`` (bumping :attr:`ModuleGraphNode.collapsed_count`)
+        and recursion continues using ``parent`` as the anchor. This keeps
+        long, uninformative chains of unknown modules from cluttering the
+        graph with one node per occurrence.
         """
         edge = ModuleGraphEdge(raw_module)
+
+        if (
+            edge.source == UNKNOWN_SOURCE
+            and parent is not None
+            and parent.source == UNKNOWN_SOURCE
+            and edge.option == parent.option
+        ):
+            parent.collapsed_count += 1
+            for imported_entry in raw_module.get("imports", []):
+                self._process_entry(imported_entry, option_filter, parent)
+            return
 
         # Check if flake.nix starting point
         is_flake_entry = edge.module == "flake.nix"
@@ -179,6 +206,63 @@ class ModuleGraph:
         imports = raw_module.get("imports", [])
         for imported_entry in imports:
             self._process_entry(imported_entry, option_filter, node)
+
+    def _merge_redundant_unknown_nodes(self) -> None:
+        """Merge unknown-source nodes that carry no distinguishing information.
+
+        Two unknown-source nodes are redundant duplicates of each other when they
+        share the same triggering option and the exact same set of outgoing
+        destinations: neither tells a viewer anything the other doesn't, so they
+        are merged into one, summing their ``collapsed_count``. This is a global
+        equivalence (not limited to literal siblings of one parent) and repeats
+        until a full pass makes no further merges, since collapsing one group can
+        change a node's own destination set and reveal a further equivalence
+        one level up.
+        """
+        while True:
+            remap = self._collapse_equivalent_unknown_groups()
+            if not remap:
+                return
+            self._redirect_imports(remap)
+
+    def _collapse_equivalent_unknown_groups(self) -> dict[tuple[str, str, str], tuple[str, str, str]]:
+        """Merge each group of equivalent unknown-source nodes into one survivor.
+
+        Returns a mapping from every merged-away node's identity to the survivor
+        it was merged into, for :meth:`_redirect_imports` to apply.
+        """
+        groups: dict[tuple[str, frozenset], list[tuple[str, str, str]]] = {}
+        for key, node in self.modules.items():
+            if node.source != UNKNOWN_SOURCE:
+                continue
+            destinations = frozenset((e.source, e.module, e.key) for e in node.imports)
+            groups.setdefault((node.option, destinations), []).append(key)
+
+        remap: dict[tuple[str, str, str], tuple[str, str, str]] = {}
+        for members in groups.values():
+            survivor, *duplicates = members
+            if not duplicates:
+                continue
+            self.modules[survivor].collapsed_count += sum(self.modules[d].collapsed_count for d in duplicates)
+            for duplicate in duplicates:
+                remap[duplicate] = survivor
+                del self.modules[duplicate]
+        return remap
+
+    def _redirect_imports(self, remap: dict[tuple[str, str, str], tuple[str, str, str]]) -> None:
+        """Point every edge targeting a merged-away node at its survivor instead."""
+        for node in self.modules.values():
+            deduped: list[ModuleGraphEdge] = []
+            seen: set[tuple[str, str, str]] = set()
+            for edge in node.imports:
+                target = (edge.source, edge.module, edge.key)
+                if target in remap:
+                    edge.source, edge.module, edge.key = remap[target]
+                    target = remap[target]
+                if target not in seen:
+                    seen.add(target)
+                    deduped.append(edge)
+            node.imports = deduped
 
     def _get_or_create_module(self, edge: ModuleGraphEdge) -> ModuleGraphNode:
         """Return the existing node for ``edge``, creating it if necessary."""
