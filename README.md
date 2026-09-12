@@ -74,6 +74,12 @@ default: gv
 nixoscope --option "flake.modules"
 ```
 
+### Write output to a file
+```bash
+nixoscope --output graph.gv
+```
+default: prints to stdout
+
 ## Result
 ![Graphviz output](./docs/graph.svg)
 ### Filtered by "flake.modules"

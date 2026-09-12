@@ -55,6 +55,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Filter by option prefix",
     )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Write the rendered graph to this file instead of stdout",
+    )
 
     return parser.parse_args()
 
@@ -66,14 +72,19 @@ def load_json(json_file: Path) -> dict:
 
 
 def main() -> None:
-    """Entry point: parse args, build the graph, and print the output."""
+    """Entry point: parse args, build the graph, and write the output."""
     args = parse_args()
     raw_modules = load_json(args.input)
 
     # Filter data to only handle everything under flake.nix
     raw_modules = [raw_module for raw_module in raw_modules if str(raw_module["file"]).endswith("/flake.nix")]
     graph = ModuleGraph(raw_modules, args.option)
-    print(graph.render(_VISUALIZERS[args.format]))
+    result = graph.render(_VISUALIZERS[args.format])
+
+    if args.output:
+        args.output.write_text(result)
+    else:
+        print(result)
 
 
 if __name__ == "__main__":
